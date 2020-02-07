@@ -211,6 +211,27 @@ PCollection<String> merged = collections.apply(Flatten.<String>pCollections());
 
 ```
 
+#### Partition
+Partition is a Beam transform for PCollection objects that store the same data type. Partition splits a single PCollection into a fixed number of smaller collections.
+
+```Java
+// Provide an int value with the desired number of result partitions, and a PartitionFn that represents the
+// partitioning function. In this example, we define the PartitionFn in-line. Returns a PCollectionList
+// containing each of the resulting partitions as individual PCollection objects.
+PCollection<Student> students = ...;
+// Split students up into 10 partitions, by percentile:
+PCollectionList<Student> studentsByPercentile =
+    students.apply(Partition.of(10, new PartitionFn<Student>() {
+        public int partitionFor(Student student, int numPartitions) {
+            return student.getPercentile()  // 0..99
+                 * numPartitions / 100;
+        }}));
+
+// You can extract each partition from the PCollectionList using the get method, as follows:
+PCollection<Student> fortiethPercentile = studentsByPercentile.get(4);
+
+```
+
 ##### Data encoding in merged collections
 By default, the coder for the output PCollection is the same as the coder for the first PCollection in the input PCollectionList. However, the input PCollection objects can each use different coders, as long as they all contain the same data type in your chosen language.
 
@@ -239,4 +260,110 @@ Any function object you provide to a transform must be fully serializable. This 
 
 * Thread-compatibility
 Your function object should be thread-compatible. Each instance of your function object is accessed by a single thread at a time on a worker instance, unless you explicitly create your own threads. Note, however, that the Beam SDKs are not thread-safe. If you create your own threads in your user code, you must provide your own synchronization. Note that static members in your function object are not passed to worker instances and that multiple instances of your function may be accessed from different threads.
+
+#### Additional outputs
+
+While ParDo always produces a main output PCollection (as the return value from apply), you can also have your ParDo produce any number of additional output PCollections. If you choose to have multiple outputs, your ParDo returns all of the output PCollections (including the main output) bundled together.
+
+Tags for multiple outputs
+```Java
+// To emit elements to multiple output PCollections, create a TupleTag object to identify each collection
+// that your ParDo produces. For example, if your ParDo produces three output PCollections (the main output
+// and two additional outputs), you must create three TupleTags. The following example code shows how to
+// create TupleTags for a ParDo with three output PCollections.
+
+  // Input PCollection to our ParDo.
+  PCollection<String> words = ...;
+
+  // The ParDo will filter words whose length is below a cutoff and add them to
+  // the main ouput PCollection<String>.
+  // If a word is above the cutoff, the ParDo will add the word length to an
+  // output PCollection<Integer>.
+  // If a word starts with the string "MARKER", the ParDo will add that word to an
+  // output PCollection<String>.
+  final int wordLengthCutOff = 10;
+
+  // Create three TupleTags, one for each output PCollection.
+  // Output that contains words below the length cutoff.
+  final TupleTag<String> wordsBelowCutOffTag =
+      new TupleTag<String>(){};
+  // Output that contains word lengths.
+  final TupleTag<Integer> wordLengthsAboveCutOffTag =
+      new TupleTag<Integer>(){};
+  // Output that contains "MARKER" words.
+  final TupleTag<String> markedWordsTag =
+      new TupleTag<String>(){};
+
+// Passing Output Tags to ParDo:
+// After you specify the TupleTags for each of your ParDo outputs, pass the tags to your ParDo by invoking
+// .withOutputTags. You pass the tag for the main output first, and then the tags for any additional outputs
+// in a TupleTagList. Building on our previous example, we pass the three TupleTags for our three output
+// PCollections to our ParDo. Note that all of the outputs (including the main output PCollection) are
+// bundled into the returned PCollectionTuple.
+
+  PCollectionTuple results =
+      words.apply(ParDo
+          .of(new DoFn<String, String>() {
+            // DoFn continues here.
+            ...
+          })
+          // Specify the tag for the main output.
+          .withOutputTags(wordsBelowCutOffTag,
+          // Specify the tags for the two additional outputs as a TupleTagList.
+                          TupleTagList.of(wordLengthsAboveCutOffTag)
+                                      .and(markedWordsTag)));
+```
+
+Emitting to multiple outputs in your DoFn
+
+```Java
+// Inside your ParDo's DoFn, you can emit an element to a specific output PCollection by providing a
+// MultiOutputReceiver to your process method, and passing in the appropriate TupleTag to obtain an OutputReceiver.
+// After your ParDo, extract the resulting output PCollections from the returned PCollectionTuple.
+// Based on the previous example, this shows the DoFn emitting to the main output and two additional outputs.
+
+  .of(new DoFn<String, String>() {
+     public void processElement(@Element String word, MultiOutputReceiver out) {
+       if (word.length() <= wordLengthCutOff) {
+         // Emit short word to the main output.
+         // In this example, it is the output with tag wordsBelowCutOffTag.
+         out.get(wordsBelowCutOffTag).output(word);
+       } else {
+         // Emit long word length to the output with tag wordLengthsAboveCutOffTag.
+         out.get(wordLengthsAboveCutOffTag).output(word.length());
+       }
+       if (word.startsWith("MARKER")) {
+         // Emit word to the output with tag markedWordsTag.
+         out.get(markedWordsTag).output(word);
+       }
+     }}));
+```
+
+### Pipeline I/O
+
+When you create a pipeline, you often need to read data from some external source, such as a file or a database. Likewise, you may want your pipeline to output its result data to an external storage system. Beam provides read and write transforms for a number of common data storage types. If you want your pipeline to read from or write to a data storage format that isn’t supported by the built-in transforms, you can implement your own read and write transforms.
+
+Reading input data:
+```Java
+PCollection<String> lines = p.apply(TextIO.read().from("gs://some/inputData.txt"));
+```
+
+Writing output data
+```Java
+output.apply(TextIO.write().to("gs://some/outputData"));
+```
+
+Reading from multiple locations
+```Java
+p.apply("ReadFromText",
+    TextIO.read().from("protocol://my_bucket/path/to/input-*.csv"));
+```
+
+Writing to multiple output files
+```Java
+records.apply("WriteToText",
+    TextIO.write().to("protocol://my_bucket/path/to/numbers")
+                .withSuffix(".csv"));
+
+```
 
